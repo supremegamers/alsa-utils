@@ -22,10 +22,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
-#include <alsa/input.h>
-#include <alsa/output.h>
-#include <alsa/conf.h>
-#include <alsa/error.h>
+#include <alsa/asoundlib.h>
 #include "gettext.h"
 #include "topology.h"
 #include "pre-processor.h"
@@ -87,6 +84,10 @@ int tplg_parent_update(struct tplg_pre_processor *tplg_pp, snd_config_t *parent,
 	char *item_id;
 	int ret, id = 0;
 
+	/* Nothing to do if parent is NULL */
+	if (!parent)
+		return 0;
+
 	child = tplg_object_get_instance_config(tplg_pp, parent);
 	ret = snd_config_search(child, "name", &cfg);
 	if (ret < 0) {
@@ -114,12 +115,16 @@ int tplg_parent_update(struct tplg_pre_processor *tplg_pp, snd_config_t *parent,
 
 	/* get section config */
 	if (!strcmp(section_name, "tlv")) {
-		ret = tplg_config_make_add(&item_config, section_name,
-					  SND_CONFIG_TYPE_STRING, cfg);
-		if (ret < 0) {
-			SNDERR("Error creating section config widget %s for %s\n",
-			       section_name, parent_name);
-			return ret;
+		/* set tlv name if config exists already */
+		ret = snd_config_search(cfg, section_name, &item_config);
+			if (ret < 0) {
+			ret = tplg_config_make_add(&item_config, section_name,
+						  SND_CONFIG_TYPE_STRING, cfg);
+			if (ret < 0) {
+				SNDERR("Error creating section config widget %s for %s\n",
+				       section_name, parent_name);
+				return ret;
+			}
 		}
 
 		return snd_config_set_string(item_config, item_name);
@@ -201,35 +206,32 @@ static int tplg_create_config_template(struct tplg_pre_processor *tplg_pp,
 		return ret;
 
 	/* add integer configs */
-	if (items->int_config_ids)
-		for (i = 0; i < MAX_CONFIGS_IN_TEMPLATE; i++)
-			if (items->int_config_ids[i]) {
-				ret = tplg_config_make_add(&child, items->int_config_ids[i],
-							   SND_CONFIG_TYPE_INTEGER, top);
-				if (ret < 0)
-					goto err;
-			}
+	for (i = 0; i < MAX_CONFIGS_IN_TEMPLATE; i++)
+		if (items->int_config_ids[i]) {
+			ret = tplg_config_make_add(&child, items->int_config_ids[i],
+						   SND_CONFIG_TYPE_INTEGER, top);
+			if (ret < 0)
+				goto err;
+		}
 
 	/* add string configs */
-	if (items->string_config_ids)
-		for (i = 0; i < MAX_CONFIGS_IN_TEMPLATE; i++)
-			if (items->string_config_ids[i]) {
-				ret = tplg_config_make_add(&child, items->string_config_ids[i],
-							   SND_CONFIG_TYPE_STRING, top);
-				if (ret < 0)
-					goto err;
-			}
+	for (i = 0; i < MAX_CONFIGS_IN_TEMPLATE; i++)
+		if (items->string_config_ids[i]) {
+			ret = tplg_config_make_add(&child, items->string_config_ids[i],
+						   SND_CONFIG_TYPE_STRING, top);
+			if (ret < 0)
+				goto err;
+		}
 
 	/* add compound configs */
-	if (items->compound_config_ids)
-		for (i = 0; i < MAX_CONFIGS_IN_TEMPLATE; i++) {
-			if (items->compound_config_ids[i]) {
-				ret = tplg_config_make_add(&child, items->compound_config_ids[i],
-							   SND_CONFIG_TYPE_COMPOUND, top);
-				if (ret < 0)
-					goto err;
-			}
+	for (i = 0; i < MAX_CONFIGS_IN_TEMPLATE; i++) {
+		if (items->compound_config_ids[i]) {
+			ret = tplg_config_make_add(&child, items->compound_config_ids[i],
+						   SND_CONFIG_TYPE_COMPOUND, top);
+			if (ret < 0)
+				goto err;
 		}
+	}
 
 err:
 	if (ret < 0) {
@@ -472,11 +474,11 @@ static snd_config_t *tplg_object_lookup_in_config(struct tplg_pre_processor *tpl
 static int tplg_pp_add_object_tuple_section(struct tplg_pre_processor *tplg_pp,
 					    snd_config_t *class_cfg,
 					    snd_config_t *attr, char *data_name,
-					    const char *token_ref)
+					    const char *token_ref, const char *array_name)
 {
 	snd_config_t *top, *tuple_cfg, *child, *cfg, *new;
 	const char *id;
-	char *token, *type;
+	char *token, *type, *str;
 	long tuple_value;
 	int ret;
 
@@ -502,6 +504,15 @@ static int tplg_pp_add_object_tuple_section(struct tplg_pre_processor *tplg_pp,
 	if (!token)
 		return -ENOMEM;
 	snprintf(token, strlen(token_ref) - strlen(type) + 1, "%s", token_ref);
+
+	if (!array_name)
+		str = strdup(type + 1);
+	else
+		str = tplg_snprintf("%s.%s", type + 1, array_name);
+	if (!str) {
+		ret = -ENOMEM;
+		goto free;
+	}
 
 	tuple_cfg = tplg_find_config(top, data_name);
 	if (!tuple_cfg) {
@@ -532,26 +543,29 @@ static int tplg_pp_add_object_tuple_section(struct tplg_pre_processor *tplg_pp,
 			goto err;
 		}
 
-		ret = tplg_config_make_add(&cfg, type + 1, SND_CONFIG_TYPE_COMPOUND,
+		ret = tplg_config_make_add(&cfg, str, SND_CONFIG_TYPE_COMPOUND,
 					  child);
 		if (ret < 0) {
 			SNDERR("Error creating tuples type config for '%s'\n", data_name);
 			goto err;
 		}
 	} else {
-		char *id;
+		snd_config_t *tuples_cfg;
 
-		id = tplg_snprintf("tuples.%s", type + 1);
-		if (!id) {
-			ret = -ENOMEM;
+		ret = snd_config_search(tuple_cfg, "tuples" , &tuples_cfg);
+		if (ret < 0) {
+			SNDERR("can't find tuples config in %s\n", data_name);
 			goto err;
 		}
 
-		ret = snd_config_search(tuple_cfg, id , &cfg);
-		free(id);
-		if (ret < 0) {
-			SNDERR("can't find type config %s\n", type + 1);
-			goto err;
+		cfg = tplg_find_config(tuples_cfg, str);
+		if (!cfg) {
+			ret = tplg_config_make_add(&cfg, str, SND_CONFIG_TYPE_COMPOUND,
+						  tuples_cfg);
+			if (ret < 0) {
+				SNDERR("Error creating tuples config for '%s' and type name %s\n", data_name, str);
+				goto err;
+			}
 		}
 	}
 
@@ -584,10 +598,9 @@ static int tplg_pp_add_object_tuple_section(struct tplg_pre_processor *tplg_pp,
 	}
 
 	ret = snd_config_add(cfg, new);
-	if (ret < 0)
-		goto err;
-
 err:
+	free(str);
+free:
 	free(token);
 	return ret;
 }
@@ -652,8 +665,8 @@ static int tplg_pp_add_object_data_section(struct tplg_pre_processor *tplg_pp,
 	return snd_config_set_string(child, data_name);
 }
 
-static int tplg_add_object_data(struct tplg_pre_processor *tplg_pp, snd_config_t *obj_cfg,
-				snd_config_t *top)
+int tplg_add_object_data(struct tplg_pre_processor *tplg_pp, snd_config_t *obj_cfg,
+			 snd_config_t *top, const char *array_name)
 {
 	snd_config_iterator_t i, next;
 	snd_config_t *data_cfg, *class_cfg, *n, *obj;
@@ -704,7 +717,7 @@ static int tplg_add_object_data(struct tplg_pre_processor *tplg_pp, snd_config_t
 		}
 
 		ret = tplg_pp_add_object_tuple_section(tplg_pp, class_cfg, n, data_cfg_name,
-						       token);
+						       token, array_name);
 		if (ret < 0) {
 			SNDERR("Failed to add data section %s\n", data_cfg_name);
 			free(data_cfg_name);
@@ -761,6 +774,60 @@ static int tplg_object_add_attributes(snd_config_t *dst, snd_config_t *template,
 static const struct build_function_map *tplg_object_get_map(struct tplg_pre_processor *tplg_pp,
 							    snd_config_t *obj);
 
+/* Add object attributes to the private data of the parent object config */
+static int tplg_build_parent_data(struct tplg_pre_processor *tplg_pp, snd_config_t *obj_cfg,
+				  snd_config_t *parent)
+{
+	snd_config_t *obj, *parent_obj, *section_cfg, *top;
+	const struct build_function_map *map;
+	const char *id, *parent_id;
+	int ret;
+
+	/* nothing to do if parent is NULL */
+	if (!parent)
+		return 0;
+
+	obj = tplg_object_get_instance_config(tplg_pp, obj_cfg);
+	parent_obj = tplg_object_get_instance_config(tplg_pp, parent);
+
+	/* get object ID */
+	if (snd_config_get_id(obj, &id) < 0) {
+		SNDERR("Invalid ID for object\n");
+		return -EINVAL;
+	}
+
+	/* get parent object name or ID */
+	parent_id = tplg_object_get_name(tplg_pp, parent_obj);
+	if (!parent_id) {
+		ret = snd_config_get_id(parent_obj, &parent_id);
+		if (ret < 0) {
+			SNDERR("Invalid ID for parent of object %s\n", id);
+			return ret;
+		}
+	}
+
+	map = tplg_object_get_map(tplg_pp, parent);
+	if (!map) {
+		SNDERR("Parent object %s not supported\n", parent_id);
+		return -EINVAL;
+	}
+
+	/* find parent config with ID */
+	ret = snd_config_search(tplg_pp->output_cfg, map->section_name, &section_cfg);
+	if (ret < 0) {
+		SNDERR("No SectionBE found\n");
+		return ret;
+	}
+
+	top = tplg_find_config(section_cfg, parent_id);
+	if (!top) {
+		SNDERR("SectionBE %s not found\n", parent_id);
+		return -EINVAL;
+	}
+
+	return tplg_add_object_data(tplg_pp, obj_cfg, top, id);
+}
+
 /*
  * Function to create a new "section" config based on the template. The new config will be
  * added to the output_cfg or the top_config input parameter.
@@ -814,16 +881,18 @@ int tplg_build_object_from_template(struct tplg_pre_processor *tplg_pp, snd_conf
 		*wtop = top;
 	} else {
 		*wtop = tplg_find_config(top, object_name);
-		if (!(*wtop)) {
-			ret = tplg_config_make_add(wtop, object_name, SND_CONFIG_TYPE_COMPOUND,
-						   top);
-			if (ret < 0) {
-				SNDERR("Error creating config for %s\n", object_name);
-				return ret;
-			}
+		if (*wtop)
+			goto template;
+
+		ret = tplg_config_make_add(wtop, object_name, SND_CONFIG_TYPE_COMPOUND,
+					   top);
+		if (ret < 0) {
+			SNDERR("Error creating config for %s\n", object_name);
+			return ret;
 		}
 	}
 
+template:
 	/* create template config */
 	if (!map->template_items)
 		return 0;
@@ -858,7 +927,7 @@ static int tplg_build_generic_object(struct tplg_pre_processor *tplg_pp, snd_con
 	if (ret < 0)
 		return ret;
 
-	ret = tplg_add_object_data(tplg_pp, obj_cfg, wtop);
+	ret = tplg_add_object_data(tplg_pp, obj_cfg, wtop, NULL);
 	if (ret < 0)
 		SNDERR("Failed to add data section for %s\n", name);
 
@@ -901,6 +970,7 @@ const struct config_template_items mixer_control_config = {
 
 const struct config_template_items bytes_control_config = {
 	.int_config_ids = {"index", "base", "num_regs", "max", "mask"},
+	.compound_config_ids = {"access"}
 };
 
 const struct config_template_items scale_config = {
@@ -926,28 +996,34 @@ const struct config_template_items data_config = {
 	.string_config_ids = {"bytes"}
 };
 
+/*
+ * Items without class name should be placed lower than those with one,
+ * because they are much more generic.
+ */
 const struct build_function_map object_build_map[] = {
-	{"Base", "manifest", "SectionManifest", &tplg_build_generic_object, NULL},
-	{"Base", "data", "SectionData", &tplg_build_data_object, &data_config},
-	{"Base", "tlv", "SectionTLV", &tplg_build_tlv_object, NULL},
-	{"Base", "scale", "scale", &tplg_build_scale_object, &scale_config},
-	{"Base", "ops", "ops" ,&tplg_build_ops_object, &ops_config},
-	{"Base", "extops", "extops" ,&tplg_build_ops_object, &ops_config},
-	{"Base", "channel", "channel", &tplg_build_channel_object, &channel_config},
-	{"Base", "VendorToken", "SectionVendorTokens", &tplg_build_vendor_token_object, NULL},
-	{"Base", "hw_config", "SectionHWConfig", &tplg_build_hw_cfg_object,
+	{"Base", "manifest", "SectionManifest", &tplg_build_generic_object, NULL, NULL},
+	{"Base", "data", "SectionData", &tplg_build_data_object, NULL, &data_config},
+	{"Base", "tlv", "SectionTLV", &tplg_build_tlv_object, NULL, NULL},
+	{"Base", "scale", "scale", &tplg_build_scale_object, NULL, &scale_config},
+	{"Base", "ops", "ops" ,&tplg_build_ops_object, NULL, &ops_config},
+	{"Base", "extops", "extops" ,&tplg_build_ops_object, NULL, &ops_config},
+	{"Base", "channel", "channel", &tplg_build_channel_object, NULL, &channel_config},
+	{"Base", "VendorToken", "SectionVendorTokens", &tplg_build_vendor_token_object,
+	 NULL, NULL},
+	{"Base", "hw_config", "SectionHWConfig", &tplg_build_hw_cfg_object, NULL,
 	 &hwcfg_config},
-	{"Base", "fe_dai", "dai", &tplg_build_fe_dai_object, &fe_dai_config},
-	{"Base", "route", "SectionGraph", &tplg_build_dapm_route_object, NULL},
-	{"Widget", "", "SectionWidget", &tplg_build_generic_object, &widget_config},
-	{"Control", "mixer", "SectionControlMixer", &tplg_build_mixer_control,
+	{"Base", "fe_dai", "dai", &tplg_build_fe_dai_object, NULL, &fe_dai_config},
+	{"Base", "route", "SectionGraph", &tplg_build_dapm_route_object, NULL, NULL},
+	{"Widget", "buffer", "SectionWidget", &tplg_build_generic_object, NULL, &widget_config},
+	{"Widget", "", "SectionWidget", &tplg_build_generic_object, NULL, &widget_config},
+	{"Control", "mixer", "SectionControlMixer", &tplg_build_mixer_control, NULL,
 	 &mixer_control_config},
-	{"Control", "bytes", "SectionControlBytes", &tplg_build_bytes_control,
+	{"Control", "bytes", "SectionControlBytes", &tplg_build_bytes_control, NULL,
 	 &bytes_control_config},
-	{"Dai", "", "SectionBE", &tplg_build_generic_object, &be_dai_config},
-	{"PCM", "pcm", "SectionPCM", &tplg_build_generic_object, &pcm_config},
+	{"Dai", "", "SectionBE", &tplg_build_generic_object, NULL, &be_dai_config},
+	{"PCM", "pcm", "SectionPCM", &tplg_build_generic_object, NULL, &pcm_config},
 	{"PCM", "pcm_caps", "SectionPCMCapabilities", &tplg_build_pcm_caps_object,
-	 &pcm_caps_config},
+	 NULL, &pcm_caps_config},
 };
 
 static const struct build_function_map *tplg_object_get_map(struct tplg_pre_processor *tplg_pp,
@@ -969,7 +1045,8 @@ static const struct build_function_map *tplg_object_get_map(struct tplg_pre_proc
 
 	for (i = 0; i < ARRAY_SIZE(object_build_map); i++) {
 		if (!strcmp(class_type, "Widget") &&
-		    !strcmp(object_build_map[i].class_type, "Widget"))
+		    !strcmp(object_build_map[i].class_type, "Widget") &&
+			!strcmp(object_build_map[i].class_name, ""))
 			return &object_build_map[i];
 
 		if (!strcmp(class_type, "Dai") &&
@@ -1009,9 +1086,12 @@ static int tplg_object_copy_and_add_param(struct tplg_pre_processor *tplg_pp,
 					  snd_config_t *attr_cfg,
 					  snd_config_t *search_config)
 {
-	snd_config_t *attr, *new;
+	snd_config_iterator_t first = snd_config_iterator_first(obj);
+	snd_config_t *attr, *new, *first_cfg;
 	const char *id, *search_id;
 	int ret;
+
+	first_cfg = snd_config_iterator_entry(first);
 
 	if (snd_config_get_id(attr_cfg, &id) < 0)
 		return 0;
@@ -1030,10 +1110,19 @@ static int tplg_object_copy_and_add_param(struct tplg_pre_processor *tplg_pp,
 		return ret;
 	}
 
-	ret = snd_config_add(obj, new);
-	if (ret < 0) {
-		snd_config_delete(new);
-		SNDERR("error adding attribute '%s' value to %s\n", id, search_id);
+	if (first_cfg) {
+		/* prepend the new config */
+		ret = snd_config_add_before(first_cfg, new);
+		if (ret < 0) {
+			snd_config_delete(new);
+			SNDERR("error prepending attribute '%s' value to %s\n", id, search_id);
+		}
+	} else {
+		ret = snd_config_add(obj, new);
+		if (ret < 0) {
+			snd_config_delete(new);
+			SNDERR("error adding attribute '%s' value to %s\n", id, search_id);
+		}
 	}
 
 	return ret;
@@ -1290,13 +1379,13 @@ static int tplg_construct_object_name(struct tplg_pre_processor *tplg_pp, snd_co
 
 		/* alloc and concat arg value to the name */
 		temp = tplg_snprintf("%s.%s", new_name, arg_value);
+		free(arg_value);
 		if (!temp) {
 			ret = -ENOMEM;
 			goto err;
 		}
 		free(new_name);
 		new_name = temp;
-		free(arg_value);
 	}
 
 	ret = snd_config_set_id(obj, new_name);
@@ -1410,13 +1499,69 @@ snd_config_t *tplg_object_get_instance_config(struct tplg_pre_processor *tplg_pp
 	return snd_config_iterator_entry(first);
 }
 
+#if SND_LIB_VER(1, 2, 5) < SND_LIB_VERSION
+static int pre_process_find_variable(snd_config_t **dst, const char *str, snd_config_t *config)
+{
+	snd_config_iterator_t i, next;
+
+	snd_config_for_each(i, next, config) {
+		snd_config_t *n;
+		const char *id;
+
+		n = snd_config_iterator_entry(i);
+		if (snd_config_get_id(n, &id) < 0)
+			continue;
+
+		if (strcmp(id, str))
+			continue;
+
+		/* found definition, copy config */
+		return snd_config_copy(dst, n);
+	}
+
+	return -EINVAL;
+}
+static int
+pre_process_object_variables_expand_fcn(snd_config_t **dst, const char *str, void *private_data)
+{
+
+	struct tplg_pre_processor *tplg_pp = private_data;
+	snd_config_t *object_cfg = tplg_pp->current_obj_cfg;
+	snd_config_t *conf_defines;
+	const char *object_id;
+	int ret;
+
+	ret = snd_config_search(tplg_pp->input_cfg, "Define", &conf_defines);
+	if (ret < 0)
+		return 0;
+
+	/* find variable from global definitions first */
+	ret = pre_process_find_variable(dst, str, conf_defines);
+	if (ret >= 0)
+		return ret;
+
+	if (snd_config_get_id(object_cfg, &object_id) < 0)
+		return -EINVAL;
+
+	/* find variable from object attribute values if not found in global definitions */
+	ret = pre_process_find_variable(dst, str, object_cfg);
+	if (ret < 0)
+		SNDERR("Failed to find definition for attribute %s in '%s' object\n",
+		       str, object_id);
+
+	return ret;
+}
+#endif
+
 /* build object config and its child objects recursively */
 static int tplg_build_object(struct tplg_pre_processor *tplg_pp, snd_config_t *new_obj,
 			      snd_config_t *parent)
 {
 	snd_config_t *obj_local, *class_cfg;
 	const struct build_function_map *map;
+	snd_config_iterator_t i, next;
 	build_func builder;
+	update_auto_attr_func auto_attr_updater;
 	const char *id, *class_id;
 	int ret;
 
@@ -1455,18 +1600,71 @@ static int tplg_build_object(struct tplg_pre_processor *tplg_pp, snd_config_t *n
 		return ret;
 	}
 
-	/* skip object if not supported and pre-process its child objects */
-	map = tplg_object_get_map(tplg_pp, new_obj);
-	if (!map)
-		goto child;
+#if SND_LIB_VER(1, 2, 5) < SND_LIB_VERSION
+	tplg_pp_config_debug(tplg_pp, obj_local);
 
-	/* build the object and save the sections to the output config */
-	builder = map->builder;
+	/* expand all non-compound type child configs in object */
+	snd_config_for_each(i, next, obj_local) {
+		snd_config_t *n, *new;
+		const char *id, *s;
+
+		n = snd_config_iterator_entry(i);
+
+		if (snd_config_get_type(n) == SND_CONFIG_TYPE_COMPOUND)
+			continue;
+
+		if (snd_config_get_id(n, &id) < 0)
+			continue;
+
+		if (snd_config_get_string(n, &s) < 0)
+			continue;
+
+		if (*s != '$')
+			continue;
+
+		tplg_pp->current_obj_cfg = obj_local;
+
+		/* expand config */
+		ret = snd_config_evaluate_string(&new, s, pre_process_object_variables_expand_fcn,
+						 tplg_pp);
+		if (ret < 0) {
+			SNDERR("Failed to evaluate attributes %s in %s\n", id, class_id);
+			return ret;
+		}
+
+		snd_config_set_id(new, id);
+
+		ret = snd_config_merge(n, new, true);
+		if (ret < 0)
+			return ret;
+	}
+#endif
+
+	/*
+	 * Build objects if object type is supported.
+	 * If not, process object attributes and add to parent's data section
+	 */
+	map = tplg_object_get_map(tplg_pp, new_obj);
+	if (map) {
+		builder = map->builder;
+
+		/* update automatic attribute for current object */
+		auto_attr_updater = map->auto_attr_updater;
+		if(auto_attr_updater) {
+			ret = auto_attr_updater(tplg_pp, obj_local, parent);
+			if (ret < 0) {
+				SNDERR("Failed to update automatic attributes for %s\n", id);
+				return ret;
+			}
+		}
+	} else {
+		builder = &tplg_build_parent_data;
+	}
+
 	ret = builder(tplg_pp, new_obj, parent);
 	if (ret < 0)
 		return ret;
 
-child:
 	/* create child objects in the object instance */
 	ret = tplg_object_pre_process_children(tplg_pp, new_obj, obj_local);
 	if (ret < 0) {
@@ -1500,16 +1698,90 @@ int tplg_pre_process_objects(struct tplg_pre_processor *tplg_pp, snd_config_t *c
 		if (snd_config_get_id(n, &class_name) < 0)
 			continue;
 		snd_config_for_each(i2, next2, n) {
+			snd_config_t *temp_n2;
+
 			n2 = snd_config_iterator_entry(i2);
 			if (snd_config_get_id(n2, &id) < 0) {
 				SNDERR("Invalid id for object\n");
 				return -EINVAL;
 			}
 
-			/* create a temp config for object with class type as the root node */
-			ret = snd_config_make(&_obj_type, class_type, SND_CONFIG_TYPE_COMPOUND);
+			ret = snd_config_copy(&temp_n2, n2);
 			if (ret < 0)
 				return ret;
+
+			/*
+			 * An object declared within a class definition as follows:
+			 * Class.Pipeline.volume-playback {
+			 * 	Object.Widget.pga.0 {
+			 * 		ramp_step_ms 250
+            		 * 	}
+			 * }
+			 * 
+			 * While instantiating the volume-pipeline class, the pga object
+			 * could be modified as follows:
+			 * Object.Pipeline.volume-playback.0 {
+			 * 	Object.Widget.pga.0 {
+			 * 		format "s24le"
+			 * 	}
+			 * }
+			 * When building the pga.0 object in the class definition, merge
+			 * the attributes declared in the volume-playback.0 object to create
+			 * a new config as follows to make sure that all attributes are
+			 * set for the pga object.
+			 * Object.Widget.pga.0 {
+			 * 	ramp_step_ms 250
+			 * 	format "s24le"
+			 * }
+			 */ 
+
+			if (parent) {
+				snd_config_t *parent_instance, *parent_obj, *temp;
+				char *obj_cfg_name;
+
+				obj_cfg_name = tplg_snprintf("%s%s.%s.%s", "Object.",
+							     class_type, class_name, id);
+
+				/* search for object instance in the parent */
+				parent_instance = tplg_object_get_instance_config(tplg_pp, parent);
+				if (!parent_instance)
+					goto temp_cfg;
+
+				ret = snd_config_search(parent_instance, obj_cfg_name, &parent_obj);
+				free(obj_cfg_name);
+				if (ret < 0)
+					goto temp_cfg;
+
+				/* don't merge if the object configs are the same */
+				if (parent_obj == n2)
+					goto temp_cfg;
+
+				/* create a temp config copying the parent object config */
+				ret = snd_config_copy(&temp, parent_obj);
+				if (ret < 0) {
+					snd_config_delete(temp_n2);
+					return ret;
+				}
+
+				/*
+				 * Merge parent object with the current object instance.
+				 * temp will be deleted by merge
+				 */
+				ret = snd_config_merge(temp_n2, temp, false);
+				if (ret < 0) {
+					SNDERR("error merging parent object config for %s.%s.%s\n",
+					       class_type, class_name, id);
+					snd_config_delete(temp_n2);
+					return ret;
+				}
+			}
+temp_cfg:
+			/* create a temp config for object with class type as the root node */
+			ret = snd_config_make(&_obj_type, class_type, SND_CONFIG_TYPE_COMPOUND);
+			if (ret < 0) {
+				snd_config_delete(temp_n2);
+				return ret;
+			}
 
 			ret = snd_config_make(&_obj_class, class_name, SND_CONFIG_TYPE_COMPOUND);
 			if (ret < 0)
@@ -1521,7 +1793,7 @@ int tplg_pre_process_objects(struct tplg_pre_processor *tplg_pp, snd_config_t *c
 				goto err;
 			}
 
-			ret = snd_config_copy(&_obj, n2);
+			ret = snd_config_copy(&_obj, temp_n2);
 			if (ret < 0)
 				goto err;
 
@@ -1537,6 +1809,7 @@ int tplg_pre_process_objects(struct tplg_pre_processor *tplg_pp, snd_config_t *c
 				SNDERR("Error building object %s.%s.%s\n",
 				       class_type, class_name, id);
 err:
+			snd_config_delete(temp_n2);
 			snd_config_delete(_obj_type);
 			if (ret < 0)
 				return ret;

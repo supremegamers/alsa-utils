@@ -41,6 +41,7 @@
 #include <time.h>
 #include <locale.h>
 #include <alsa/asoundlib.h>
+#include <alsa/use-case.h>
 #include <assert.h>
 #include <termios.h>
 #include <signal.h>
@@ -452,6 +453,30 @@ static ssize_t xwrite(int fd, const void *buf, size_t count)
 	return offset;
 }
 
+static int open_ucm(snd_use_case_mgr_t **uc_mgr, char **pcm_name, const char *name)
+{
+	char *s, *p;
+	int err;
+
+	s = strdup(name);
+	if (s == NULL)
+		return -ENOMEM;
+	p = strchr(s, '.');
+	if (p == NULL)
+		return -EINVAL;
+	*p = '\0';
+	err = snd_use_case_mgr_open(uc_mgr, s);
+	if (err < 0)
+		return err;
+	err = snd_use_case_get(*uc_mgr, p + 1, (const char **)pcm_name);
+	if (err < 0) {
+		error(_("UCM value '%s' error: %s"), p + 1, snd_strerror(err));
+		snd_use_case_mgr_close(*uc_mgr);
+		return err;
+	}
+	return err;
+}
+
 static long parse_long(const char *str, int *err)
 {
 	long val;
@@ -528,6 +553,7 @@ int main(int argc, char *argv[])
 	int do_device_list = 0, do_pcm_list = 0, force_sample_format = 0;
 	snd_pcm_info_t *info;
 	FILE *direction;
+	snd_use_case_mgr_t *uc_mgr = NULL;
 
 #ifdef ENABLE_NLS
 	setlocale(LC_ALL, "");
@@ -826,6 +852,16 @@ int main(int argc, char *argv[])
 		goto __end;
 	}
 
+	if (strncmp(pcm_name, "ucm.", 4) == 0) {
+		err = open_ucm(&uc_mgr, &pcm_name, pcm_name + 4);
+		if (err < 0) {
+			error(_("UCM open error: %s"), snd_strerror(err));
+			return 1;
+		}
+		if (verbose)
+			fprintf(stderr, _("Found UCM PCM device: %s\n"), pcm_name);
+	}
+
 	err = snd_pcm_open(&handle, pcm_name, stream, open_mode);
 	if (err < 0) {
 		error(_("audio open error: %s"), snd_strerror(err));
@@ -915,6 +951,8 @@ int main(int argc, char *argv[])
 	if (verbose==2)
 		putchar('\n');
 	snd_pcm_close(handle);
+	if (uc_mgr)
+		snd_use_case_mgr_close(uc_mgr);
 	handle = NULL;
 	free(audiobuf);
       __end:
@@ -1758,10 +1796,12 @@ static void print_vu_meter_stereo(int *perc, int *maxperc)
 		if (c)
 			memset(line + bar_length + 6 + 1, '#', p);
 		else
-			memset(line + bar_length - p - 1, '#', p);
-		p = maxperc[c] * bar_length / 100;
-		if (p > bar_length)
-			p = bar_length;
+			memset(line + bar_length - p, '#', p);
+		p = maxperc[c] * bar_length / 100 - 1;
+		if (p < 0)
+			p = 0;
+		else if (p >= bar_length)
+			p = bar_length - 1;
 		if (c)
 			line[bar_length + 6 + 1 + p] = '+';
 		else
@@ -1828,9 +1868,10 @@ static void compute_max_peak(u_char *data, size_t samples)
 				sval = le16toh(*valp);
 			else
 				sval = be16toh(*valp);
-			sval = abs(sval) ^ mask;
-			if (max_peak[c] < sval)
-				max_peak[c] = sval;
+			sval ^= mask;
+			val = abs(sval);
+			if (max_peak[c] < val)
+				max_peak[c] = val;
 			valp++;
 			if (vumeter == VUMETER_STEREO)
 				c = !c;
@@ -1848,11 +1889,12 @@ static void compute_max_peak(u_char *data, size_t samples)
 			} else {
 				val = (valp[0]<<16) | (valp[1]<<8) | valp[2];
 			}
+			val ^= mask;
 			/* Correct signed bit in 32-bit value */
 			if (val & (1<<(bits_per_sample-1))) {
 				val |= 0xff<<24;	/* Negate upper bits too */
 			}
-			val = abs(val) ^ mask;
+			val = abs(val);
 			if (max_peak[c] < val)
 				max_peak[c] = val;
 			valp += 3;
@@ -1871,7 +1913,11 @@ static void compute_max_peak(u_char *data, size_t samples)
 				val = le32toh(*valp);
 			else
 				val = be32toh(*valp);
-			val = abs(val) ^ mask;
+			val ^= mask;
+			if (val == 0x80000000U)
+				val = 0x7fffffff;
+			else
+				val = abs(val);
 			if (max_peak[c] < val)
 				max_peak[c] = val;
 			valp++;
@@ -1892,6 +1938,8 @@ static void compute_max_peak(u_char *data, size_t samples)
 		max = 0x7fffffff;
 
 	for (c = 0; c < ichans; c++) {
+		if (max_peak[c] > max)
+			max_peak[c] = max;
 		if (bits_per_sample > 16)
 			perc[c] = max_peak[c] / (max / 100);
 		else

@@ -19,10 +19,7 @@
 */
 #include <errno.h>
 #include <stdio.h>
-#include <alsa/input.h>
-#include <alsa/output.h>
-#include <alsa/conf.h>
-#include <alsa/error.h>
+#include <alsa/asoundlib.h>
 #include "topology.h"
 #include "pre-processor.h"
 
@@ -114,6 +111,10 @@ static int tplg_build_control(struct tplg_pre_processor *tplg_pp, snd_config_t *
 	ret = tplg_build_object_from_template(tplg_pp, obj_cfg, &cfg, NULL, false);
 	if (ret < 0)
 		return ret;
+
+	ret = tplg_add_object_data(tplg_pp, obj_cfg, cfg, NULL);
+	if (ret < 0)
+		SNDERR("Failed to add data section for %s\n", name);
 
 	return tplg_parent_update(tplg_pp, parent, type, name);
 }
@@ -406,7 +407,7 @@ int tplg_build_dapm_route_object(struct tplg_pre_processor *tplg_pp, snd_config_
 		goto err;
 	}
 
-	line_str = tplg_snprintf("%s, %s, %s", src_widget_name, control, sink_widget_name);
+	line_str = tplg_snprintf("%s, %s, %s", sink_widget_name, control, src_widget_name);
 	if (!line_str) {
 		ret = -ENOMEM;
 		goto err;
