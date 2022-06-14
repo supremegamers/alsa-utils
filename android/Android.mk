@@ -152,7 +152,7 @@ LOCAL_SRC_FILES := $(addprefix alsamixer/,\
 	volume_mapping.c \
 	widget.c)
 
-LOCAL_MODULE := alsa_alsamixer
+LOCAL_MODULE := alsa_mixer
 LOCAL_SHARED_LIBRARIES := libasound libncurses
 LOCAL_STATIC_LIBRARIES := libmenu libpanel libform
 LOCAL_HEADER_LIBRARIES := alsa_utils_headers
