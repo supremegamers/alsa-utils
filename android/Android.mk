@@ -79,6 +79,7 @@ LOCAL_SRC_FILES := $(addprefix alsactl/,\
 	alsactl.c \
 	clean.c \
 	daemon.c \
+	info.c \
 	init_parse.c \
 	init_ucm.c \
 	lock.c \
