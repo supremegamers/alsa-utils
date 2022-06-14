@@ -51,6 +51,7 @@ int do_lock = 0;
 int use_syslog = 0;
 char *command;
 char *statefile = NULL;
+char *lockpath = SYS_LOCKPATH;
 char *lockfile = SYS_LOCKFILE;
 
 #define TITLE	0x0100
@@ -79,6 +80,7 @@ static struct arg args[] = {
 { FILEARG | 'a', "config-dir", "boot / hotplug configuration directory (default " SYS_ASOUND_DIR ")" },
 { 'l', "lock", "use file locking to serialize concurrent access" },
 { 'L', "no-lock", "do not use file locking to serialize concurrent access" },
+{ FILEARG | 'K', "lock-dir", "lock path (default " SYS_LOCKPATH ")" },
 { FILEARG | 'O', "lock-state-file", "state lock file path (default " SYS_LOCKFILE ")" },
 { 'F', "force", "try to restore the matching controls as much as possible" },
 { 0, NULL, "  (default mode)" },
@@ -117,6 +119,7 @@ static struct arg args[] = {
 { CARDCMD, "rdaemon", "like daemon but do the state restore at first" },
 { KILLCMD, "kill", "notify daemon to quit, rescan or save_and_quit" },
 { CARDCMD, "monitor", "monitor control events" },
+{ CARDCMD, "info", "general information" },
 { CARDCMD, "clean", "clean application controls" },
 { EMPCMD, "dump-state", "dump the state (for all cards)" },
 { EMPCMD, "dump-cfg", "dump the configuration (expanded, for all cards)" },
@@ -306,6 +309,9 @@ int main(int argc, char *argv[])
 		case 'L':
 			do_lock = -1;
 			break;
+		case 'K':
+			lockpath = optarg;
+			break;
 		case 'O':
 			lockfile = optarg;
 			break;
@@ -460,6 +466,8 @@ int main(int argc, char *argv[])
 		res = state_daemon_kill(pidfile, cardname);
 	} else if (!strcmp(cmd, "monitor")) {
 		res = monitor(cardname);
+	} else if (!strcmp(cmd, "info")) {
+		res = general_info(cardname);
 	} else if (!strcmp(cmd, "clean")) {
 		res = clean(cardname, extra_args);
 	} else if (!strcmp(cmd, "dump-state")) {

@@ -58,6 +58,7 @@ _("Usage: %s [OPTIONS]...\n"
 "-o, --output=FILE       set output file\n"
 #if SND_LIB_VER(1, 2, 5) < SND_LIB_VERSION
 "-D, --define=ARGS       define variables (VAR1=VAL1[,VAR2=VAL2] ...)\n"
+"                        (may be used multiple times)\n"
 "-I, --inc-dir=DIR       set include path\n"
 #endif
 "-s, --sort              sort the identifiers in the normalized output\n"
@@ -250,13 +251,13 @@ static char *get_inc_path(const char *filename)
 	return r;
 }
 
-/* Convert Topology2.0 conf to the existing conf syntax */
-static int pre_process_conf(const char *source_file, const char *output_file,
-			    const char *pre_processor_defs, const char *include_path)
+static int pre_process_run(struct tplg_pre_processor **tplg_pp,
+			   const char *source_file, const char *output_file,
+			   const char *pre_processor_defs, const char *include_path)
 {
-	struct tplg_pre_processor *tplg_pp;
 	size_t config_size;
 	char *config, *inc_path;
+	snd_output_type_t output_type;
 	int err;
 
 	err = load(source_file, (void **)&config, &config_size);
@@ -264,7 +265,8 @@ static int pre_process_conf(const char *source_file, const char *output_file,
 		return err;
 
 	/* init pre-processor */
-	err = init_pre_processor(&tplg_pp, SND_OUTPUT_STDIO, output_file);
+	output_type = output_file == NULL ? SND_OUTPUT_BUFFER : SND_OUTPUT_STDIO;
+	err = init_pre_processor(tplg_pp, output_type, output_file);
 	if (err < 0) {
 		fprintf(stderr, _("failed to init pre-processor for Topology2.0\n"));
 		free(config);
@@ -276,12 +278,29 @@ static int pre_process_conf(const char *source_file, const char *output_file,
 		inc_path = get_inc_path(source_file);
 	else
 		inc_path = strdup(include_path);
-	err = pre_process(tplg_pp, config, config_size, pre_processor_defs, inc_path);
+	err = pre_process(*tplg_pp, config, config_size, pre_processor_defs, inc_path);
 	free(inc_path);
 
-	/* free pre-processor */
-	free_pre_preprocessor(tplg_pp);
+	if (err < 0)
+		free_pre_processor(*tplg_pp);
 	free(config);
+	return err;
+}
+
+/* Convert Topology2.0 conf to the existing conf syntax */
+static int pre_process_conf(const char *source_file, const char *output_file,
+			    const char *pre_processor_defs, const char *include_path)
+{
+	struct tplg_pre_processor *tplg_pp;
+	int err;
+
+	err = pre_process_run(&tplg_pp, source_file, output_file,
+			      pre_processor_defs, include_path);
+	if (err < 0)
+		return err;
+
+	/* free pre-processor */
+	free_pre_processor(tplg_pp);
 	return err;
 }
 
@@ -290,7 +309,7 @@ static int compile(const char *source_file, const char *output_file, int cflags,
 {
 	struct tplg_pre_processor *tplg_pp = NULL;
 	snd_tplg_t *tplg;
-	char *config, *inc_path;
+	char *config;
 	void *bin;
 	size_t config_size, size;
 	int err;
@@ -304,28 +323,17 @@ static int compile(const char *source_file, const char *output_file, int cflags,
 		char *pconfig;
 		size_t size;
 
-		/* init pre-processor */
-		init_pre_processor(&tplg_pp, SND_OUTPUT_BUFFER, NULL);
-
-		/* pre-process conf file */
-		if (!include_path)
-			inc_path = get_inc_path(source_file);
-		else
-			inc_path = strdup(include_path);
-		err = pre_process(tplg_pp, config, config_size, pre_processor_defs, inc_path);
-		free(inc_path);
-		if (err) {
-			free_pre_preprocessor(tplg_pp);
-			free(config);
+		err = pre_process_run(&tplg_pp, source_file, NULL,
+				      pre_processor_defs, include_path);
+		if (err < 0)
 			return err;
-		}
 
 		/* load topology */
 		size = snd_output_buffer_string(tplg_pp->output, &pconfig);
 		err = load_topology(&tplg, pconfig, size, cflags);
 
 		/* free pre-processor */
-		free_pre_preprocessor(tplg_pp);
+		free_pre_processor(tplg_pp);
 	} else {
 		err = load_topology(&tplg, config, config_size, cflags);
 	}
@@ -380,6 +388,22 @@ static int decode(const char *source_file, const char *output_file,
 	return err;
 }
 
+#if SND_LIB_VER(1, 2, 5) < SND_LIB_VERSION
+static int add_define(char **defs, char *d)
+{
+	size_t len = (*defs ? strlen(*defs) : 0) + strlen(d) + 2;
+	char *m = realloc(*defs, len);
+	if (m) {
+		if (*defs)
+			strcat(m, ",");
+		strcat(m, d);
+		*defs = m;
+		return 0;
+	}
+	return 1;
+}
+#endif
+
 int main(int argc, char *argv[])
 {
 	static const char short_options[] = "hc:d:n:u:v:o:pP:sgxzV"
@@ -410,7 +434,7 @@ int main(int argc, char *argv[])
 	char *source_file = NULL;
 	char *output_file = NULL;
 	const char *inc_path = NULL;
-	const char *pre_processor_defs = NULL;
+	char *pre_processor_defs = NULL;
 	int c, err, op = 'c', cflags = 0, dflags = 0, sflags = 0, option_index;
 
 #ifdef ENABLE_NLS
@@ -469,7 +493,10 @@ int main(int argc, char *argv[])
 			break;
 #if SND_LIB_VER(1, 2, 5) < SND_LIB_VERSION
 		case 'D':
-			pre_processor_defs = optarg;
+			if (add_define(&pre_processor_defs, optarg)) {
+				fprintf(stderr, _("No enough memory"));
+				return 1;
+			}
 			break;
 #endif
 		case 'V':
@@ -483,6 +510,12 @@ int main(int argc, char *argv[])
 
 	if (source_file == NULL || output_file == NULL) {
 		usage(argv[0]);
+		return 1;
+	}
+
+	if ((cflags & SND_TPLG_CREATE_VERBOSE) != 0 &&
+	    output_file && strcmp(output_file, "-") == 0) {
+		fprintf(stderr, _("Invalid mix of verbose level and output to stdout.\n"));
 		return 1;
 	}
 
@@ -511,5 +544,6 @@ int main(int argc, char *argv[])
 	}
 
 	snd_output_close(log);
+	free(pre_processor_defs);
 	return err ? 1 : 0;
 }

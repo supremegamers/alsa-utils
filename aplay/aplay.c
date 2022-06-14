@@ -885,7 +885,7 @@ int main(int argc, char *argv[])
 	    isatty(fileno(stdin)) &&
 	    stream == SND_PCM_STREAM_CAPTURE &&
 	    snd_pcm_format_width(rhwparams.format) <= 8)
-		fprintf(stderr, "Warning: Some sources (like microphones) may produce inaudiable results\n"
+		fprintf(stderr, "Warning: Some sources (like microphones) may produce inaudible results\n"
 				"         with 8-bit sampling. Use '-f' argument to increase resolution\n"
 				"         e.g. '-f S16_LE'.\n");
 
@@ -2268,7 +2268,7 @@ static ssize_t pcm_read(u_char *data, size_t rcount)
 		}
 	}
 abort:
-	return rcount;
+	return result;
 }
 
 static ssize_t pcm_readv(u_char **data, unsigned int channels, size_t rcount)
@@ -3326,7 +3326,7 @@ static void capture(char *orig_name)
 			}
 			count -= c;
 			rest -= c;
-			fdcount += c;
+			fdcount += save;
 		}
 
 		/* re-enable SIGUSR1 signal */

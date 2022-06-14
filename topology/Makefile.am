@@ -1,3 +1,5 @@
+SUBDIRS = nhlt
+
 bin_PROGRAMS = \
 	alsatplg
 
@@ -11,10 +13,10 @@ endif
 alsatplg_SOURCES = topology.c pre-processor.c pre-process-class.c pre-process-object.c \
 		    pre-process-dapm.c pre-process-dai.c
 
-noinst_HEADERS = topology.h pre-processor.h
+noinst_HEADERS = topology.h pre-processor.h pre-process-external.h
 
 AM_CPPFLAGS = \
-         -Wall -I$(top_srcdir)/include
+         -Wall -I$(top_srcdir)/include -DALSA_TOPOLOGY_PLUGIN_DIR=\"@ALSA_TOPOLOGY_PLUGIN_DIR@\"
 
 alsatplg_LDADD = $(ALSA_TOPOLOGY_LIBS)
 

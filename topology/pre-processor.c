@@ -25,11 +25,125 @@
 #include <string.h>
 #include <errno.h>
 #include <regex.h>
+#include <dlfcn.h>
 
 #include <alsa/asoundlib.h>
 #include "gettext.h"
 #include "topology.h"
 #include "pre-processor.h"
+#include "pre-process-external.h"
+
+#define SND_TOPOLOGY_MAX_PLUGINS 32
+
+static int get_plugin_string(struct tplg_pre_processor *tplg_pp, char **plugin_string)
+{
+	const char *lib_names_t = NULL;
+	snd_config_t *defines;
+	int ret;
+
+	ret = snd_config_search(tplg_pp->input_cfg, "Define.PREPROCESS_PLUGINS", &defines);
+	if (ret < 0)
+		return ret;
+
+	ret = snd_config_get_string(defines, &lib_names_t);
+	if (ret < 0)
+		return ret;
+
+	*plugin_string = strdup(lib_names_t);
+
+	if (!*plugin_string)
+		return -ENOMEM;
+
+	return 0;
+}
+
+static int run_plugin(struct tplg_pre_processor *tplg_pp, char *plugin)
+{
+	plugin_pre_process process;
+	char *xlib, *xfunc, *path;
+	void *h = NULL;
+	int ret = 0;
+
+	/* compose the plugin path, if not from environment, then from default plugins dir */
+	path = getenv("ALSA_TOPOLOGY_PLUGIN_DIR");
+	if (!path)
+		path = ALSA_TOPOLOGY_PLUGIN_DIR;
+
+	xlib = tplg_snprintf("%s/%s%s%s", path, PROCESS_LIB_PREFIX, plugin,
+			     PROCESS_LIB_POSTFIX);
+	xfunc = tplg_snprintf("%s%s%s", PROCESS_FUNC_PREFIX, plugin,
+			      PROCESS_FUNC_POSTFIX);
+
+	if (!xlib || !xfunc) {
+		fprintf(stderr, "can't reserve memory for plugin paths and func names\n");
+		ret = -ENOMEM;
+		goto err;
+	}
+
+	/* open plugin */
+	h = dlopen(xlib, RTLD_NOW);
+	if (!h) {
+		fprintf(stderr, "unable to open library '%s'\n", xlib);
+		ret = -EINVAL;
+		goto err;
+	}
+
+	/* find function */
+	process = dlsym(h, xfunc);
+
+	if (!process) {
+		fprintf(stderr, "symbol 'topology_process' was not found in %s\n", xlib);
+		ret = -EINVAL;
+		goto err;
+	}
+
+	/* process plugin */
+	process(tplg_pp->input_cfg, tplg_pp->output_cfg);
+
+err:
+	if (h)
+		dlclose(h);
+	if (xlib)
+		free(xlib);
+	if (xfunc)
+		free(xfunc);
+
+	return ret;
+}
+
+static int pre_process_plugins(struct tplg_pre_processor *tplg_pp)
+{
+	char *plugins[SND_TOPOLOGY_MAX_PLUGINS];
+	char *plugin_string;
+	int count;
+	int ret;
+	int i;
+
+	/* parse plugin names */
+	ret = get_plugin_string(tplg_pp, &plugin_string);
+
+	/* no plugins defined, so just return */
+	if (ret < 0)
+		return 0;
+
+	count = 0;
+	plugins[count] = strtok(plugin_string, ":");
+	while ((count < SND_TOPOLOGY_MAX_PLUGINS - 1) && plugins[count]) {
+		count++;
+		plugins[count] = strtok(NULL, ":");
+	}
+
+	/* run all plugins */
+	for (i = 0; i < count; i++) {
+		ret = run_plugin(tplg_pp, plugins[i]);
+		if (ret < 0)
+			return ret;
+	}
+
+	free(plugin_string);
+
+	return 0;
+}
 
 /*
  * Helper function to find config by id.
@@ -167,11 +281,14 @@ static int pre_process_config(struct tplg_pre_processor *tplg_pp, snd_config_t *
 	return 0;
 }
 
-void free_pre_preprocessor(struct tplg_pre_processor *tplg_pp)
+void free_pre_processor(struct tplg_pre_processor *tplg_pp)
 {
 	snd_output_close(tplg_pp->output);
 	snd_output_close(tplg_pp->dbg_output);
 	snd_config_delete(tplg_pp->output_cfg);
+	if (tplg_pp->define_cfg)
+		snd_config_delete(tplg_pp->define_cfg);
+	free(tplg_pp->inc_path);
 	free(tplg_pp);
 }
 
@@ -225,33 +342,84 @@ err:
 }
 
 #if SND_LIB_VER(1, 2, 5) < SND_LIB_VERSION
-static int pre_process_defines(struct tplg_pre_processor *tplg_pp, const char *pre_processor_defs,
-			       snd_config_t *top)
+static int pre_process_set_defines(struct tplg_pre_processor *tplg_pp, const char *pre_processor_defs)
 {
-	snd_config_t *conf_defines, *defines;
 	int ret;
 
-	ret = snd_config_search(tplg_pp->input_cfg, "Define", &conf_defines);
-	if (ret < 0)
-		return 0;
-
-	if (snd_config_get_type(conf_defines) != SND_CONFIG_TYPE_COMPOUND)
-		return 0;
-
 	/*
-	 * load and merge the command line defines with the variables in the conf file to override
-	 * default values
+	 * load the command line defines to the configuration tree
 	 */
 	if (pre_processor_defs != NULL) {
-		ret = snd_config_load_string(&defines, pre_processor_defs, strlen(pre_processor_defs));
+		ret = snd_config_load_string(&tplg_pp->define_cfg, pre_processor_defs, 0);
 		if (ret < 0) {
 			fprintf(stderr, "Failed to load pre-processor command line definitions\n");
 			return ret;
 		}
+	} else {
+		tplg_pp->define_cfg = NULL;
+	}
 
-		ret = snd_config_merge(conf_defines, defines, true);
+	return 0;
+}
+
+static int pre_process_add_defines(struct tplg_pre_processor *tplg_pp, snd_config_t *from)
+{
+	snd_config_t *conf_defines, *conf_tmp;
+	int ret;
+
+	ret = snd_config_search(from, "Define", &conf_defines);
+	if (ret == -ENOENT) {
+		if (tplg_pp->input_cfg == from && tplg_pp->define_cfg) {
+			conf_defines = NULL;
+			goto create;
+		}
+	}
+	if (ret < 0)
+		return ret;
+
+	if (snd_config_get_type(conf_defines) != SND_CONFIG_TYPE_COMPOUND) {
+		fprintf(stderr, "Define must be a compound!\n");
+		return -EINVAL;
+	}
+
+	if (tplg_pp->input_cfg == from)
+		tplg_pp->define_cfg_merged = conf_defines;
+
+	if (tplg_pp->define_cfg_merged == NULL) {
+create:
+		ret = snd_config_make_compound(&tplg_pp->define_cfg_merged, "Define", 0);
+		if (ret < 0)
+			return ret;
+		ret = snd_config_add(tplg_pp->input_cfg, tplg_pp->define_cfg_merged);
+		if (ret < 0)
+			return ret;
+	}
+
+	if (tplg_pp->define_cfg_merged != conf_defines) {
+		/*
+		 * merge back to the main configuration tree (Define subtree)
+		 */
+		ret = snd_config_merge(tplg_pp->define_cfg_merged, conf_defines, true);
+		if (ret < 0) {
+			fprintf(stderr, "Failed to override main variable definitions\n");
+			return ret;
+		}
+	}
+
+	/*
+	 * merge the command line defines with the variables in the conf file to override
+	 * default values; use a copy (merge deletes the source tree)
+	 */
+	if (tplg_pp->define_cfg) {
+		ret = snd_config_copy(&conf_tmp, tplg_pp->define_cfg);
+		if (ret < 0) {
+			fprintf(stderr, "Failed to copy variable definitions\n");
+			return ret;
+		}
+		ret = snd_config_merge(tplg_pp->define_cfg_merged, conf_tmp, true);
 		if (ret < 0) {
 			fprintf(stderr, "Failed to override variable definitions\n");
+			snd_config_delete(conf_tmp);
 			return ret;
 		}
 	}
@@ -259,12 +427,10 @@ static int pre_process_defines(struct tplg_pre_processor *tplg_pp, const char *p
 	return 0;
 }
 
-static int pre_process_includes(struct tplg_pre_processor *tplg_pp, snd_config_t *top,
-				const char *pre_processor_defs, const char *inc_path);
+static int pre_process_includes(struct tplg_pre_processor *tplg_pp, snd_config_t *top);
 
 static int pre_process_include_conf(struct tplg_pre_processor *tplg_pp, snd_config_t *config,
-				    const char *pre_processor_defs, snd_config_t **new,
-				    snd_config_t *variable, const char *inc_path)
+				    snd_config_t **new, snd_config_t *variable)
 {
 	snd_config_iterator_t i, next;
 	const char *variable_name;
@@ -344,7 +510,7 @@ static int pre_process_include_conf(struct tplg_pre_processor *tplg_pp, snd_conf
 			goto err;
 
 		if (filename && filename[0] != '/')
-			full_path = tplg_snprintf("%s/%s", inc_path, filename);
+			full_path = tplg_snprintf("%s/%s", tplg_pp->inc_path, filename);
 		else
 			full_path = tplg_snprintf("%s", filename);
 
@@ -364,15 +530,15 @@ static int pre_process_include_conf(struct tplg_pre_processor *tplg_pp, snd_conf
 			goto err;
 		}
 
-		/* process any args in the included file */
-		ret = pre_process_defines(tplg_pp, pre_processor_defs, *new);
-		if (ret < 0) {
+		/* forcefully overwrite with defines from the command line */
+		ret = pre_process_add_defines(tplg_pp, *new);
+		if (ret < 0 && ret != -ENOENT) {
 			fprintf(stderr, "Failed to parse arguments in input config\n");
 			goto err;
 		}
 
 		/* recursively process any nested includes */
-		return pre_process_includes(tplg_pp, *new, pre_processor_defs, inc_path);
+		return pre_process_includes(tplg_pp, *new);
 	}
 
 err:
@@ -380,23 +546,21 @@ err:
 	return ret;
 }
 
-static int pre_process_includes(struct tplg_pre_processor *tplg_pp, snd_config_t *top,
-				const char *pre_processor_defs, const char *inc_path)
+static int pre_process_includes(struct tplg_pre_processor *tplg_pp, snd_config_t *top)
 {
 	snd_config_iterator_t i, next;
-	snd_config_t *includes, *conf_defines;
+	snd_config_t *includes;
 	const char *top_id;
 	int ret;
+
+	if (tplg_pp->define_cfg_merged == NULL)
+		return 0;
 
 	ret = snd_config_search(top, "IncludeByKey", &includes);
 	if (ret < 0)
 		return 0;
 
 	snd_config_get_id(top, &top_id);
-
-	ret = snd_config_search(tplg_pp->input_cfg, "Define", &conf_defines);
-	if (ret < 0)
-		return 0;
 
 	snd_config_for_each(i, next, includes) {
 		snd_config_t *n, *new, *define;
@@ -407,14 +571,14 @@ static int pre_process_includes(struct tplg_pre_processor *tplg_pp, snd_config_t
 			continue;
 
 		/* find id from variable definitions */
-		ret = snd_config_search(conf_defines, id, &define);
+		ret = snd_config_search(tplg_pp->define_cfg_merged, id, &define);
 		if (ret < 0) {
 			fprintf(stderr, "No variable defined for %s\n", id);
 			return ret;
 		}
 
 		/* create conf node from included file */
-		ret = pre_process_include_conf(tplg_pp, n, pre_processor_defs, &new, define, inc_path);
+		ret = pre_process_include_conf(tplg_pp, n, &new, define);
 		if (ret < 0) {
 			fprintf(stderr, "Unable to process include file \n");
 			return ret;
@@ -428,14 +592,13 @@ static int pre_process_includes(struct tplg_pre_processor *tplg_pp, snd_config_t
 		}
 	}
 
-	/* remove all includes from current top */
-	snd_config_remove(includes);
+	/* delete all includes from current top */
+	snd_config_delete(includes);
 
 	return 0;
 }
 
-static int pre_process_includes_all(struct tplg_pre_processor *tplg_pp, snd_config_t *top,
-				const char *pre_processor_defs, const char *inc_path)
+static int pre_process_includes_all(struct tplg_pre_processor *tplg_pp, snd_config_t *top)
 {
 	snd_config_iterator_t i, next;
 	int ret;
@@ -444,7 +607,7 @@ static int pre_process_includes_all(struct tplg_pre_processor *tplg_pp, snd_conf
 		return 0;
 
 	/* process includes at this node */
-	ret = pre_process_includes(tplg_pp, top, pre_processor_defs, inc_path);
+	ret = pre_process_includes(tplg_pp, top);
 	if (ret < 0) {
 		fprintf(stderr, "Failed to process includes\n");
 		return ret;
@@ -456,7 +619,7 @@ static int pre_process_includes_all(struct tplg_pre_processor *tplg_pp, snd_conf
 
 		n = snd_config_iterator_entry(i);
 
-		ret = pre_process_includes_all(tplg_pp, n, pre_processor_defs, inc_path);
+		ret = pre_process_includes_all(tplg_pp, n);
 		if (ret < 0)
 			return ret;
 	}
@@ -492,17 +655,25 @@ int pre_process(struct tplg_pre_processor *tplg_pp, char *config, size_t config_
 	}
 
 	tplg_pp->input_cfg = top;
+	tplg_pp->inc_path = inc_path ? strdup(inc_path) : NULL;
 
 #if SND_LIB_VER(1, 2, 5) < SND_LIB_VERSION
 	/* parse command line definitions */
-	err = pre_process_defines(tplg_pp, pre_processor_defs, tplg_pp->input_cfg);
+	err = pre_process_set_defines(tplg_pp, pre_processor_defs);
+	if (err < 0) {
+		fprintf(stderr, "Failed to parse arguments in input config\n");
+		goto err;
+	}
+
+	/* parse command line definitions */
+	err = pre_process_add_defines(tplg_pp, top);
 	if (err < 0) {
 		fprintf(stderr, "Failed to parse arguments in input config\n");
 		goto err;
 	}
 
 	/* include conditional conf files */
-	err = pre_process_includes_all(tplg_pp, tplg_pp->input_cfg, pre_processor_defs, inc_path);
+	err = pre_process_includes_all(tplg_pp, tplg_pp->input_cfg);
 	if (err < 0) {
 		fprintf(stderr, "Failed to process conditional includes in input config\n");
 		goto err;
@@ -512,6 +683,13 @@ int pre_process(struct tplg_pre_processor *tplg_pp, char *config, size_t config_
 	err = pre_process_config(tplg_pp, tplg_pp->input_cfg);
 	if (err < 0) {
 		fprintf(stderr, "Unable to pre-process configuration\n");
+		goto err;
+	}
+
+	/* process topology plugins */
+	err = pre_process_plugins(tplg_pp);
+	if (err < 0) {
+		fprintf(stderr, "Unable to run pre-process plugins\n");
 		goto err;
 	}
 
