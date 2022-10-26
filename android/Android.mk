@@ -9,6 +9,7 @@
 #
 
 LOCAL_PATH := $(dir $(call my-dir))
+LOCAL_ALSA_UCM_DIR := external/alsa-ucm-conf
 
 # Build version.h
 include $(CLEAR_VARS)
@@ -106,6 +107,18 @@ LOCAL_MODULE := alsa_ucm
 LOCAL_SHARED_LIBRARIES := libasound
 LOCAL_HEADER_LIBRARIES := alsa_utils_headers
 
+###Copy the alsa-ucm-conf to /system/usr/share/alsa/ucm2
+LOCAL_POST_INSTALL_CMD := $(hide) mkdir -p $(TARGET_OUT)/usr/share/alsa; \
+						rsync -av -l $(LOCAL_ALSA_UCM_DIR)/ucm2 $(TARGET_OUT)/usr/share/alsa \
+						--exclude codecs/qcom-lpass \
+						--exclude OMAP \
+						--exclude Qualcomm \
+						--exclude 'README.md' \
+						--exclude 'DEBUG.md' \
+						--exclude Rockchip \
+						--exclude Samsung \
+						--exclude Terga
+
 include $(BUILD_EXECUTABLE)
 
 # Build alsaloop command
@@ -155,6 +168,21 @@ LOCAL_SRC_FILES := $(addprefix alsamixer/,\
 LOCAL_MODULE := alsa_mixer
 LOCAL_SHARED_LIBRARIES := libasound libncurses
 LOCAL_STATIC_LIBRARIES := libmenu libpanel libform
+LOCAL_HEADER_LIBRARIES := alsa_utils_headers
+
+include $(BUILD_EXECUTABLE)
+
+# Build alsaloop command
+include $(CLEAR_VARS)
+
+LOCAL_CFLAGS := -g -Wall
+
+LOCAL_SRC_FILES := \
+	iecset/iecbits.c \
+	iecset/iecset.c
+
+LOCAL_MODULE := alsa_iecset
+LOCAL_SHARED_LIBRARIES := libasound
 LOCAL_HEADER_LIBRARIES := alsa_utils_headers
 
 include $(BUILD_EXECUTABLE)
