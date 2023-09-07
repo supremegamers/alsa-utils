@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/system_ext/bin/bash
 
 SCRIPT_VERSION=0.5.3
 CHANGELOG='https://www.alsa-project.org/alsa-info.sh.changelog'
@@ -30,11 +30,11 @@ CHANGELOG='https://www.alsa-project.org/alsa-info.sh.changelog'
 export LC_ALL=C
 
 # Change the PATH variable, so we can run lspci (needed for some distros)
-PATH="$PATH:/bin:/sbin:/usr/bin:/usr/sbin"
+PATH="$PATH:/bin:/system/bin:/vendor/bin:/system/vendor/bin"
 BGTITLE="ALSA-Info v $SCRIPT_VERSION"
 PASTEBINKEY='C9cRIO8m/9y8Cs0nVs0FraRx7U0pHsuc'
 
-WGET="$(command -v wget)"
+WGET="$(command -v busybox wget)"
 REQUIRES=(mktemp grep pgrep awk date uname cat sort dmesg amixer alsactl)
 
 #
@@ -45,7 +45,7 @@ update() {
 	test -z "$WGET" || test ! -x "$WGET" && return
 
 	SHFILE=$(mktemp -t alsa-info.XXXXXXXXXX) || exit 1
-	wget -O $SHFILE "https://www.alsa-project.org/alsa-info.sh" >/dev/null 2>&1
+	busybox wget -O $SHFILE "https://www.alsa-project.org/alsa-info.sh" >/dev/null 2>&1
 	REMOTE_VERSION=$(grep SCRIPT_VERSION $SHFILE | head -n1 | sed 's/.*=//')
 	if [ -s "$SHFILE" ] && [ "$REMOTE_VERSION" != "$SCRIPT_VERSION" ]; then
 		if [[ -n $DIALOG ]]
@@ -859,15 +859,17 @@ if [ -z "$WITHALL" ]; then
 fi
 
 # Check if wget is installed, and supports --post-file.
-if ! wget --help 2>/dev/null | grep -q post-file; then
+# HACK : Temporary check to see if the system has busybox 1.36.x, which include wget applet
+# that supports --post-file. This need to be fixed in the future. 
+if ! busybox | grep 1.36 ; then
 	# We couldn't find a suitable wget. If --upload was passed, tell the user to upload manually.
 	if [ "$UPLOAD" != yes ]; then
 		:
 	elif [ -n "$DIALOG" ]; then
 		if [ -z "$PASTEBIN" ]; then
-			dialog --backtitle "$BGTITLE" --msgbox "Could not automatically upload output to 'https://www.alsa-project.org'.\nPossible reasons are:\n\n    1. Couldn't find 'wget' in your PATH\n    2. Your version of wget is less than 1.8.2\n\nPlease manually upload $NFILE to 'https://www.alsa-project.org/cardinfo-db' and submit your post." 25 100
+			dialog --backtitle "$BGTITLE" --msgbox "Could not automatically upload output to 'https://www.alsa-project.org'.\nPossible reasons are:\n\n    1. Couldn't find 'wget' in your PATH\n    2. Your version of wget is less than 1.8.2\n    3. If you are using Android, you should use busybox 1.36+ wget from busybox-ndk Magisk module\n\nPlease manually upload $NFILE to 'https://www.alsa-project.org/cardinfo-db' and submit your post." 25 100
 		else
-			dialog --backtitle "$BGTITLE" --msgbox "Could not automatically upload output to 'https://www.pastebin.ca'.\nPossible reasons are:\n\n    1. Couldn't find 'wget' in your PATH\n    2. Your version of wget is less than 1.8.2\n\nPlease manually upload $NFILE to 'https://www.pastebin.ca/upload.php' and submit your post." 25 100
+			dialog --backtitle "$BGTITLE" --msgbox "Could not automatically upload output to 'https://www.pastebin.ca'.\nPossible reasons are:\n\n    1. Couldn't find 'wget' in your PATH\n    2. Your version of wget is less than 1.8.2\n    3. If you are using Android, you should use busybox 1.36+ wget from busybox-ndk Magisk module\n\nPlease manually upload $NFILE to 'https://www.pastebin.ca/upload.php' and submit your post." 25 100
 		fi
 	else
 		if [ -z "$PASTEBIN" ]; then
@@ -876,6 +878,7 @@ if ! wget --help 2>/dev/null | grep -q post-file; then
 			echo "Possible reasons are:"
 			echo "    1. Couldn't find 'wget' in your PATH"
 			echo "    2. Your version of wget is less than 1.8.2"
+			echo "	  3. If you are using Android, you should use busybox 1.36+ wget from busybox-ndk Magisk modules"
 			echo ""
 			echo "Please manually upload $NFILE to 'https://www.alsa-project.org/cardinfo-db' and submit your post."
 			echo ""
@@ -885,6 +888,7 @@ if ! wget --help 2>/dev/null | grep -q post-file; then
 			echo "Possible reasons are:"
 			echo "    1. Couldn't find 'wget' in your PATH"
 			echo "    2. Your version of wget is less than 1.8.2"
+			echo "	  3. If you are using Android, you should use busybox 1.36+ wget from busybox-ndk Magisk modules"
 			echo ""
 			echo "Please manually upload $NFILE to 'https://www.pastebin.ca/upload.php' and submit your post."
 			echo ""
@@ -940,9 +944,9 @@ else
 fi
 
 if [[ -z "$PASTEBIN" ]]; then
-	wget -O - --tries=5 --timeout=60 --post-file="$FILE" 'https://www.alsa-project.org/cardinfo-db/' &> "$TEMPDIR/wget.tmp"
+	busybox wget -O - -T 60 --post-file="$FILE" 'https://www.alsa-project.org/cardinfo-db/' &> "$TEMPDIR/wget.tmp"
 else
-	wget -O - --tries=5 --timeout=60 --post-file="$FILE" 'https://pastebin.ca/quiet-paste.php?api='"${PASTEBINKEY}"'&encrypt=t&encryptpw=blahblah' &> "$TEMPDIR/wget.tmp"
+	busybox wget -O - -T 60 --post-file="$FILE" 'https://pastebin.ca/quiet-paste.php?api='"${PASTEBINKEY}"'&encrypt=t&encryptpw=blahblah' &> "$TEMPDIR/wget.tmp"
 fi
 
 if [ "$?" -ne 0 ]; then
