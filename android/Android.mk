@@ -51,6 +51,7 @@ LOCAL_SRC_FILES := \
 LOCAL_MODULE := alsa_amixer
 LOCAL_SHARED_LIBRARIES := libasound
 LOCAL_HEADER_LIBRARIES := alsa_utils_headers
+LOCAL_POST_INSTALL_CMD := ln -sf /system/bin/alsa_amixer $(TARGET_OUT)/bin/amixer
 
 include $(BUILD_EXECUTABLE)
 
@@ -65,6 +66,8 @@ LOCAL_SRC_FILES := \
 LOCAL_MODULE := alsa_aplay
 LOCAL_SHARED_LIBRARIES := libasound
 LOCAL_HEADER_LIBRARIES := alsa_utils_headers
+LOCAL_POST_INSTALL_CMD := ln -sf /system/bin/alsa_aplay $(TARGET_OUT)/bin/aplay; \
+						  ln -sf /system/bin/alsa_aplay $(TARGET_OUT)/bin/arecord
 
 include $(BUILD_EXECUTABLE)
 
@@ -91,6 +94,7 @@ LOCAL_SRC_FILES := $(addprefix alsactl/,\
 LOCAL_MODULE := alsa_ctl
 LOCAL_SHARED_LIBRARIES := libasound
 LOCAL_HEADER_LIBRARIES := alsa_utils_headers
+LOCAL_POST_INSTALL_CMD := ln -sf /system/bin/alsa_ctl $(TARGET_OUT)/bin/alsactl
 
 include $(BUILD_EXECUTABLE)
 
@@ -109,6 +113,7 @@ LOCAL_HEADER_LIBRARIES := alsa_utils_headers
 
 ###Copy the alsa-ucm-conf to /system/usr/share/alsa/ucm2
 LOCAL_POST_INSTALL_CMD := $(hide) mkdir -p $(TARGET_OUT)/usr/share/alsa; \
+						ln -sf /system/bin/alsa_ucm $(TARGET_OUT)/bin/alsaucm; \
 						rsync -av -l $(LOCAL_ALSA_UCM_DIR)/ucm2 $(TARGET_OUT)/usr/share/alsa \
 						--exclude codecs/qcom-lpass \
 						--exclude OMAP \
@@ -134,6 +139,7 @@ LOCAL_SRC_FILES := \
 LOCAL_MODULE := alsa_loop
 LOCAL_SHARED_LIBRARIES := libasound
 LOCAL_HEADER_LIBRARIES := alsa_utils_headers
+LOCAL_POST_INSTALL_CMD := ln -sf /system/bin/alsa_loop $(TARGET_OUT)/bin/alsaloop
 
 include $(BUILD_EXECUTABLE)
 
@@ -169,10 +175,11 @@ LOCAL_MODULE := alsa_mixer
 LOCAL_SHARED_LIBRARIES := libasound libncurses
 LOCAL_STATIC_LIBRARIES := libmenu libpanel libform
 LOCAL_HEADER_LIBRARIES := alsa_utils_headers
+LOCAL_POST_INSTALL_CMD := ln -sf /system/bin/alsa_mixer $(TARGET_OUT)/bin/alsamixer
 
 include $(BUILD_EXECUTABLE)
 
-# Build alsaloop command
+# Build alsa_iecset command
 include $(CLEAR_VARS)
 
 LOCAL_CFLAGS := -g -Wall
@@ -184,5 +191,15 @@ LOCAL_SRC_FILES := \
 LOCAL_MODULE := alsa_iecset
 LOCAL_SHARED_LIBRARIES := libasound
 LOCAL_HEADER_LIBRARIES := alsa_utils_headers
+LOCAL_POST_INSTALL_CMD := ln -sf /system/bin/alsa_iecset $(TARGET_OUT)/bin/iecset
 
 include $(BUILD_EXECUTABLE)
+
+# Copy alsa-info.sh
+include $(CLEAR_VARS)
+LOCAL_MODULE := alsa-info.sh
+LOCAL_MODULE_TAGS := optional
+LOCAL_MODULE_CLASS := EXECUTABLES
+LOCAL_SRC_FILES := alsa-info/alsa-info.sh
+
+include $(BUILD_PREBUILT)
