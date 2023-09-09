@@ -314,7 +314,7 @@ for prg in "${REQUIRES[@]}"; do
 done
 
 # Run checks to make sure the programs we need are installed.
-LSPCI="$(command -v lspci)"
+LSPCI="$(command -v /system_ext/bin/lspci)"
 TPUT="$(command -v tput)"
 DIALOG="$(command -v dialog)"
 
@@ -465,7 +465,7 @@ awk '{ print $2 " (card " $1 ")" }' < /proc/asound/modules > $TEMPDIR/alsamodule
 cat /proc/asound/cards > $TEMPDIR/alsacards.tmp
 if [[ ! -z "$LSPCI" ]]; then
 	for class in 0401 0402 0403; do
-		lspci -vvnn -d "::$class" | sed -n '/^[^\t]/,+1p'
+		/system_ext/bin/lspci -vvnn -d "::$class" | sed -n '/^[^\t]/,+1p'
 	done > $TEMPDIR/lspci.tmp
 fi
 
