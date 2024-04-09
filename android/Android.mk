@@ -172,8 +172,9 @@ LOCAL_SRC_FILES := $(addprefix alsamixer/,\
 	widget.c)
 
 LOCAL_MODULE := alsa_mixer
+LOCAL_MODULE_TAGS := optional
 LOCAL_SHARED_LIBRARIES := libasound libncurses
-LOCAL_STATIC_LIBRARIES := libmenu libpanel libform
+#LOCAL_STATIC_LIBRARIES := libmenu libpanel libform
 LOCAL_HEADER_LIBRARIES := alsa_utils_headers
 LOCAL_POST_INSTALL_CMD := ln -sf /system/bin/alsa_mixer $(TARGET_OUT)/bin/alsamixer
 
